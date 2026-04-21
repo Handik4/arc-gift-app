@@ -1,80 +1,77 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   Blockchain & Auth Hooks
-───────────────────────────────────────────────────────────────────────────── */
-import { usePrivy } from "@privy-io/react-auth";
-import { useAccount, useBalance } from "wagmi";
 import { GiftCard3D } from "@/components/GiftCard3D";
+import { NetworkSelectorModal } from "@/components/NetworkSelectorModal";
+import { initiateCircleTransfer, type TransferParams } from "@/lib/circleTransfer";
+import type { SupportedChain } from "@/components/NetworkSelectorModal";
 
-/* ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────
    Types
-───────────────────────────────────────────────────────────────────────────── */
-type CreateStep = "compose" | "signing" | "success";
+───────────────────────────────────────────── */
+type ClaimState = "idle" | "unboxing" | "network" | "claiming" | "success" | "error";
 
-interface GiftPayload {
+interface GiftData {
+  id: string;
   amount: number;
-  message: string;
-  giftId: string;
-  shareUrl: string;
+  sender: string;
+  message?: string;
+  token: string;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   Constants
-───────────────────────────────────────────────────────────────────────────── */
-const PRESET_AMOUNTS = [5, 10, 25, 50, 100, 250];
-
-const SIGNING_MESSAGES = [
-  "Connecting to Arc Network…",
-  "Approving USDC transfer…",
-  "Securing funds on-chain…",
-  "Generating your gift link…",
-];
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   Utility Functions
-───────────────────────────────────────────────────────────────────────────── */
-function generateGiftId(): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const segment = (len: number) =>
-    Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${segment(4)}-${segment(4)}-${segment(4)}`;
-}
-
-function hapticFeedback(style: "light" | "medium" | "heavy" = "medium") {
-  try {
-    (window as any).Telegram?.WebApp?.HapticFeedback?.impactOccurred(style);
-  } catch (e) {
-    console.log("Haptic not supported outside Telegram");
-  }
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   Components (StepDots, AmountInput, MessageInput, SigningScreen, SuccessScreen)
-───────────────────────────────────────────────────────────────────────────── */
-
-function StepDots({ current }: { current: number }) {
-  const labels = ["Compose", "Sign", "Share"];
+/* ─────────────────────────────────────────────
+   Particle burst component
+───────────────────────────────────────────── */
+function ParticleBurst({ active }: { active: boolean }) {
+  const particles = Array.from({ length: 24 });
   return (
-    <div className="flex items-center justify-center gap-3 mb-8">
-      {labels.map((_, i) => (
+    <AnimatePresence>
+      {active &&
+        particles.map((_, i) => {
+          const angle = (i / particles.length) * 360;
+          const radius = 120 + Math.random() * 80;
+          const x = Math.cos((angle * Math.PI) / 180) * radius;
+          const y = Math.sin((angle * Math.PI) / 180) * radius;
+          const colors = ["#FFD700", "#00E5FF", "#FF6B9D", "#A8FF78", "#FFD700"];
+          const color = colors[i % colors.length];
+          return (
+            <motion.div
+              key={i}
+              className="absolute top-1/2 left-1/2 w-2 h-2 rounded-full pointer-events-none z-50"
+              style={{ backgroundColor: color, marginLeft: -4, marginTop: -4 }}
+              initial={{ x: 0, y: 0, opacity: 1, scale: 1 }}
+              animate={{ x, y, opacity: 0, scale: 0 }}
+              transition={{ duration: 0.9, ease: "easeOut", delay: i * 0.015 }}
+            />
+          );
+        })}
+    </AnimatePresence>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Step indicator
+───────────────────────────────────────────── */
+function StepDots({ current }: { current: number }) {
+  const steps = ["Open", "Choose Chain", "Claim"];
+  return (
+    <div className="flex items-center gap-3 justify-center mb-8">
+      {steps.map((label, i) => (
         <div key={i} className="flex items-center gap-2">
           <motion.div
             className="w-2 h-2 rounded-full"
             animate={{
-              backgroundColor: i < current ? "#FFD700" : i === current ? "#FFD700" : "#1E293B",
-              scale: i === current ? 1.5 : 1,
-              boxShadow: i === current ? "0 0 8px rgba(255,215,0,0.6)" : "none",
+              backgroundColor: i <= current ? "#FFD700" : "#334155",
+              scale: i === current ? 1.4 : 1,
             }}
             transition={{ duration: 0.3 }}
           />
-          {i < labels.length - 1 && (
+          {i < steps.length - 1 && (
             <motion.div
               className="w-8 h-px"
-              animate={{ backgroundColor: i < current ? "#FFD700" : "#1E293B" }}
+              animate={{ backgroundColor: i < current ? "#FFD700" : "#334155" }}
               transition={{ duration: 0.3 }}
             />
           )}
@@ -84,235 +81,250 @@ function StepDots({ current }: { current: number }) {
   );
 }
 
-function AmountInput({ value, onChange }: { value: string; onChange: (val: string) => void }) {
-  const numericValue = parseFloat(value) || 0;
+/* ─────────────────────────────────────────────
+   Success screen
+───────────────────────────────────────────── */
+function SuccessScreen({ amount, chain }: { amount: number; chain: string }) {
   return (
-    <div className="space-y-3">
-      <div
-        className="relative flex items-center rounded-2xl overflow-hidden transition-all duration-200"
-        style={{
-          background: "#0A1628",
-          border: "1px solid rgba(255,215,0,0.15)",
-          boxShadow: numericValue > 0 ? "0 0 0 1px rgba(255,215,0,0.12), 0 0 24px rgba(255,215,0,0.05)" : "none",
-        }}
+    <motion.div
+      className="text-center space-y-6"
+      initial={{ opacity: 0, scale: 0.8 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ type: "spring", damping: 16 }}
+    >
+      <motion.div
+        className="text-8xl"
+        animate={{ rotate: [0, -10, 10, -5, 0], scale: [1, 1.2, 1] }}
+        transition={{ duration: 0.6, delay: 0.2 }}
       >
-        <div className="pl-5 pr-1 flex items-center self-stretch" style={{ borderRight: "1px solid rgba(255,255,255,0.05)" }}>
-          <span className="font-mono font-semibold select-none transition-colors duration-200" style={{ fontSize: "1.5rem", color: numericValue > 0 ? "#FFD700" : "#334155" }}>$</span>
-        </div>
-        <input
-          type="text"
-          inputMode="decimal"
-          placeholder="0.00"
-          value={value}
-          onChange={(e) => {
-            const cleaned = e.target.value.replace(/[^\d.]/g, "");
-            const parts = cleaned.split(".");
-            if (parts.length <= 2 && (!parts[1] || parts[1].length <= 2)) onChange(cleaned);
-          }}
-          className="flex-1 bg-transparent outline-none px-4 py-5 text-white placeholder-slate-700 font-mono font-bold text-[2rem]"
-        />
-        <div className="pr-5">
-          <span className="px-3 py-1.5 rounded-full text-xs font-mono font-semibold" style={{ background: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.18)", color: "#22D3EE" }}>USDC</span>
-        </div>
+        🎊
+      </motion.div>
+      <div>
+        <p className="text-slate-400 text-sm uppercase tracking-widest font-mono mb-1">Claimed Successfully</p>
+        <h2 className="text-5xl font-bold text-white">
+          ${amount}{" "}
+          <span className="text-transparent bg-clip-text" style={{ backgroundImage: "linear-gradient(135deg, #FFD700, #FFA500)" }}>
+            USDC
+          </span>
+        </h2>
+        <p className="text-slate-400 mt-2 text-sm">
+          Sent to your wallet on <span className="text-cyan-400 font-semibold">{chain}</span>
+        </p>
       </div>
-      <div className="grid grid-cols-6 gap-2">
-        {PRESET_AMOUNTS.map((preset) => {
-          const isActive = numericValue === preset;
-          return (
-            <motion.button
-              key={preset}
-              onClick={() => { hapticFeedback("light"); onChange(String(preset)); }}
-              className="py-2 rounded-xl text-xs font-mono font-semibold"
-              style={{ background: isActive ? "linear-gradient(135deg, #FFD700, #FFA500)" : "#0A1628", color: isActive ? "#000" : "#475569", border: isActive ? "none" : "1px solid #1E293B" }}
-              whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.94 }}
-            >
-              ${preset}
-            </motion.button>
-          );
-        })}
-      </div>
-    </div>
+      <motion.div
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-mono text-slate-400"
+        style={{ backgroundColor: "#0F172A", border: "1px solid #1E293B" }}
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        Transaction confirmed on-chain
+      </motion.div>
+    </motion.div>
   );
 }
 
-function MessageInput({ value, onChange }: { value: string; onChange: (val: string) => void }) {
-  const remaining = 120 - value.length;
-  return (
-    <div className="space-y-1.5">
-      <label className="text-xs font-mono uppercase tracking-widest text-slate-500">Personal Message (optional)</label>
-      <div className="relative rounded-2xl overflow-hidden bg-[#0A1628] border border-[#1E293B]">
-        <textarea
-          rows={3}
-          maxLength={120}
-          placeholder="Write something kind…"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-full bg-transparent outline-none resize-none px-5 py-4 text-sm text-white placeholder-slate-700"
-        />
-        <div className="absolute bottom-3 right-4 font-mono text-xs" style={{ color: remaining < 20 ? "#F87171" : "#334155" }}>{remaining}</div>
-      </div>
-    </div>
-  );
-}
+/* ─────────────────────────────────────────────
+   Main Content Wrapper (Logic)
+───────────────────────────────────────────── */
+function ClaimContent() {
+  const searchParams = useSearchParams();
+  const [state, setState] = useState<ClaimState>("idle");
+  const [selectedChain, setSelectedChain] = useState<SupportedChain | null>(null);
+  const [recipientAddress, setRecipientAddress] = useState("");
+  const [addressError, setAddressError] = useState("");
+  const [showParticles, setShowParticles] = useState(false);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
 
-function SigningScreen({ amount }: { amount: number }) {
-  const [signingStep, setSigningStep] = useState(0);
+  // Dynamic Gift Data from URL with Fallbacks
+  const amount = Number(searchParams.get("amount")) || 42;
+  const sender = searchParams.get("sender") || "alex.eth";
+  const giftId = searchParams.get("id") || "gift_01jxk8mn2";
+  const token = "USDC";
+
   useEffect(() => {
-    const timers = [0, 800, 1600, 2400].map((delay, i) => setTimeout(() => setSigningStep(i), delay));
-    return () => timers.forEach(clearTimeout);
-  }, []);
-  return (
-    <motion.div className="flex flex-col items-center gap-8 py-4" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}>
-      <div className="relative w-24 h-24 flex items-center justify-center">
-        <motion.div className="absolute inset-0 rounded-full border border-yellow-500/20" animate={{ scale: [1, 1.35, 1], opacity: [0.6, 0, 0.6] }} transition={{ duration: 2, repeat: Infinity }} />
-        <div className="w-12 h-12 rounded-full flex items-center justify-center text-xl bg-yellow-500/10 border border-yellow-500/20">🔐</div>
-      </div>
-      <div className="text-center">
-        <p className="text-slate-500 text-xs font-mono uppercase tracking-widest">Locking</p>
-        <p className="font-bold text-white text-[2.5rem]">${amount} <span className="text-yellow-400 font-mono text-xl">USDC</span></p>
-      </div>
-      <div className="w-full max-w-xs space-y-3">
-        {SIGNING_MESSAGES.map((msg, i) => (
-          <div key={i} className="flex items-center gap-3" style={{ opacity: i <= signingStep ? 1 : 0.25 }}>
-             <div className="w-6 h-6 rounded-full border border-yellow-500/40 flex items-center justify-center">
-               {i < signingStep ? "✓" : i === signingStep ? "●" : ""}
-             </div>
-             <span className="text-sm font-mono text-white">{msg}</span>
-          </div>
-        ))}
-      </div>
-    </motion.div>
-  );
-}
+    if (state === "idle" || state === "unboxing") setStepIndex(0);
+    else if (state === "network") setStepIndex(1);
+    else setStepIndex(2);
+  }, [state]);
 
-function SuccessScreen({ gift, onCreateAnother }: { gift: GiftPayload; onCreateAnother: () => void }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    hapticFeedback("light");
-    navigator.clipboard.writeText(gift.shareUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleUnbox = () => {
+    setState("unboxing");
+    setShowParticles(true);
+    setTimeout(() => setShowParticles(false), 1200);
+    setTimeout(() => setState("network"), 1600);
   };
-  return (
-    <motion.div className="flex flex-col items-center gap-6 w-full" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-      <div className="text-7xl">🎊</div>
-      <div className="text-center">
-        <h2 className="text-3xl font-bold text-white">$<span className="text-yellow-400">{gift.amount}</span> USDC</h2>
-        <p className="text-slate-500 text-sm">Your gift is live on Arc Network</p>
-      </div>
-      <div className="w-full bg-[#0A1628] border border-yellow-500/20 rounded-2xl p-4 flex items-center justify-between">
-        <p className="text-cyan-400 font-mono text-xs truncate mr-4">{gift.shareUrl}</p>
-        <button onClick={handleCopy} className="bg-yellow-500 text-black px-4 py-2 rounded-xl text-xs font-bold">
-          {copied ? "Copied!" : "Copy"}
-        </button>
-      </div>
-      <button onClick={() => { hapticFeedback("heavy"); }} className="w-full py-4 rounded-2xl font-bold bg-yellow-500 text-black">📤 Share Gift</button>
-      <button onClick={onCreateAnother} className="w-full py-4 rounded-2xl text-slate-400 border border-slate-800">+ New Gift</button>
-    </motion.div>
-  );
-}
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   Main Export
-───────────────────────────────────────────────────────────────────────────── */
-export default function CreateGiftPage() {
-  const { login, authenticated } = usePrivy();
-  const { address } = useAccount();
-  
-  const [step, setStep] = useState<CreateStep>("compose");
-  const [amount, setAmount] = useState("");
-  const [message, setMessage] = useState("");
-  const [createdGift, setCreatedGift] = useState<GiftPayload | null>(null);
-  const [validationError, setValidationError] = useState("");
+  const handleNetworkSelect = (chain: SupportedChain) => {
+    setSelectedChain(chain);
+    setRecipientAddress("");
+    setAddressError("");
+    setState("claiming");
+  };
 
-  const numericAmount = parseFloat(amount) || 0;
-  const isAmountValid = numericAmount >= 1 && numericAmount <= 10000;
+  const validateAddress = (addr: string, chain: SupportedChain): boolean => {
+    if (!addr.trim()) return false;
+    if (chain.id === "solana") return addr.length >= 32 && addr.length <= 44;
+    return /^0x[a-fA-F0-9]{40}$/.test(addr);
+  };
 
-  const handleAction = async () => {
-    hapticFeedback("medium");
+  const handleClaim = async () => {
+    if (!selectedChain) return;
+    if (!validateAddress(recipientAddress, selectedChain)) {
+      setAddressError(`Enter a valid ${selectedChain.name} address`);
+      return;
+    }
     
-    // Step 1: Ensure wallet is connected
-    if (!authenticated) {
-      login();
-      return;
-    }
+    setAddressError("");
+    setIsLoading(true);
 
-    // Step 2: Validate Amount
-    if (!isAmountValid) {
-      setValidationError(numericAmount < 1 ? "Minimum $1 USDC" : "Maximum $10,000 USDC");
-      return;
-    }
-
-    // Step 3: Trigger On-Chain Flow
-    setStep("signing");
     try {
-      // Logic for real contract call goes here later
-      await new Promise(r => setTimeout(r, 3200)); 
-      
-      const giftId = generateGiftId();
-      const origin = typeof window !== "undefined" ? window.location.origin : "";
-      setCreatedGift({
-        amount: numericAmount,
-        message,
-        giftId,
-        shareUrl: `${origin}/?amount=${numericAmount}&id=${giftId}&sender=${address?.slice(0,6) || "User"}`
+      await initiateCircleTransfer({
+        giftId: giftId,
+        amountUsdc: amount,
+        destinationChain: selectedChain.id,
+        recipientAddress,
+        enableForwarder: true,
       });
-      setStep("success");
-    } catch (err) {
-      setStep("compose");
-      setValidationError("Transaction failed. Try again.");
+      setState("success");
+    } catch (error) {
+      console.error(error);
+      setState("error");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
-    <main className="min-h-screen flex flex-col items-center px-4 py-12 relative overflow-hidden bg-[#020617]">
-      {/* Visual Overlays */}
-      <div className="fixed inset-0 pointer-events-none opacity-20 bg-[linear-gradient(rgba(0,229,255,0.04)_1px,transparent_1px),linear-gradient(90deg,rgba(0,229,255,0.04)_1px,transparent_1px)] bg-[length:48px_48px]" />
-      <div className="fixed top-[-200px] left-1/2 -translate-x-1/2 w-[700px] h-[400px] rounded-full bg-yellow-500/10 blur-[80px]" />
+    <main
+      className="min-h-screen flex flex-col items-center justify-center px-4 py-12 relative overflow-hidden"
+      style={{ background: "radial-gradient(ellipse at 50% 0%, #0c1629 0%, #020617 60%)" }}
+    >
+      {/* Background decoration */}
+      <div className="absolute inset-0 pointer-events-none opacity-20" style={{ backgroundImage: "linear-gradient(rgba(0,229,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,255,0.04) 1px, transparent 1px)", backgroundSize: "48px 48px" }} />
 
-      <header className="mb-10 text-center z-10">
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <div className="w-6 h-6 rounded-full bg-yellow-500 shadow-[0_0_12px_rgba(255,215,0,0.5)]" />
-          <span className="text-white font-bold tracking-widest text-sm font-mono uppercase">ArcGift</span>
+      {/* Header */}
+      <motion.div className="mb-10 text-center" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}>
+        <div className="flex items-center justify-center gap-2 mb-3">
+          <div className="w-6 h-6 rounded-full" style={{ background: "linear-gradient(135deg, #FFD700, #FFA500)" }} />
+          <span className="text-white font-semibold tracking-widest text-sm uppercase font-mono">ArcGift</span>
         </div>
-        <p className="text-xs text-slate-600 font-mono">ON-CHAIN GIFTING · ARC NETWORK</p>
-      </header>
+        <p className="text-slate-500 text-xs tracking-widest uppercase font-mono">Powered by Arc Network · Circle USDC</p>
+      </motion.div>
 
-      <StepDots current={step === "compose" ? 0 : step === "signing" ? 1 : 2} />
+      <AnimatePresence>
+        {state !== "idle" && state !== "success" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <StepDots current={stepIndex} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      <div className="relative z-10 w-full max-w-md">
+      <div className="relative flex flex-col items-center w-full max-w-md">
+        <ParticleBurst active={showParticles} />
+
         <AnimatePresence mode="wait">
-          {step === "compose" && (
-            <motion.div key="compose" className="flex flex-col gap-6" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+          {state === "idle" && (
+            <motion.div key="idle" className="flex flex-col items-center gap-8" exit={{ opacity: 0, scale: 0.9 }}>
+              <GiftCard3D amount={amount} sender={sender} token={token} sealed={true} />
               <div className="text-center">
-                <h1 className="text-3xl font-bold text-white">Send a <span className="text-yellow-400">Gift</span></h1>
-                <p className="text-slate-500 text-sm">Gas-free. Instant. Secured by Arc.</p>
+                <p className="text-slate-400 text-sm mb-1">You received a gift from</p>
+                <p className="text-white font-bold text-lg">{sender}</p>
               </div>
-
-              <GiftCard3D amount={numericAmount} sender="You" sealed={true} />
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-mono uppercase text-slate-500">Gift Amount</label>
-                <AmountInput value={amount} onChange={setAmount} />
-                {validationError && <p className="text-red-400 text-xs font-mono mt-1">⚠ {validationError}</p>}
-              </div>
-
-              <MessageInput value={message} onChange={setMessage} />
-
-              <motion.button
-                onClick={handleAction}
-                className="w-full py-5 rounded-2xl font-bold text-black bg-yellow-500 shadow-xl"
-                whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+              <motion.button 
+                onClick={handleUnbox} 
+                className="px-10 py-4 rounded-2xl font-bold text-black bg-gradient-to-r from-yellow-400 to-orange-500"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
               >
-                {!authenticated ? "🔗 Connect Wallet" : numericAmount > 0 ? `🎁 Create $${numericAmount} Gift` : "🎁 Create Gift"}
+                🎁 Open Gift
               </motion.button>
             </motion.div>
           )}
 
-          {step === "signing" && <SigningScreen amount={numericAmount} />}
-          {step === "success" && createdGift && <SuccessScreen gift={createdGift} onCreateAnother={() => setStep("compose")} />}
+          {state === "unboxing" && (
+            <motion.div key="unboxing" className="flex flex-col items-center" exit={{ opacity: 0 }}>
+              <GiftCard3D amount={amount} sender={sender} token={token} sealed={false} animating={true} />
+            </motion.div>
+          )}
+
+          {state === "network" && (
+            <motion.div key="network" className="w-full" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+               <div className="text-center mb-6">
+                <GiftCard3D amount={amount} sender={sender} token={token} sealed={false} compact={true} />
+                <h2 className="text-2xl font-bold text-white mt-6">Where to send your <span className="text-yellow-400">${amount} USDC</span>?</h2>
+              </div>
+              <NetworkSelectorModal onSelect={handleNetworkSelect} onBack={() => setState("idle")} />
+            </motion.div>
+          )}
+
+          {state === "claiming" && selectedChain && (
+            <motion.div key="claiming" className="w-full space-y-6" initial={{ opacity: 0, x: 30 }} animate={{ opacity: 1, x: 0 }}>
+              <div className="space-y-2">
+                <label className="text-xs font-mono uppercase tracking-widest text-slate-500">Wallet Address</label>
+                <input
+                  type="text"
+                  value={recipientAddress}
+                  onChange={(e) => { setRecipientAddress(e.target.value); setAddressError(""); }}
+                  className="w-full px-4 py-4 rounded-xl text-sm font-mono text-white bg-slate-900 border border-slate-800 outline-none focus:border-yellow-500"
+                  placeholder={selectedChain.id === "solana" ? "Solana address" : "0x..."}
+                />
+                {addressError && <p className="text-red-400 text-xs font-mono">{addressError}</p>}
+              </div>
+
+              {/* Fee breakdown maintained from original design */}
+              <div className="rounded-xl p-4 space-y-2 bg-slate-900 border border-slate-800">
+                <div className="flex justify-between text-xs font-mono text-slate-500 italic">
+                   <span>Gas Fee (covered)</span>
+                   <span>~$0.001</span>
+                </div>
+                <div className="flex justify-between text-xs font-mono text-slate-400">
+                  <span>Forwarding Fee</span>
+                  <span>$0.20</span>
+                </div>
+                <div className="flex justify-between text-xs font-mono text-yellow-400 font-bold">
+                  <span>Net Amount</span>
+                  <span>${(amount - 0.20).toFixed(2)} USDC</span>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button onClick={() => setState("network")} className="flex-1 py-3.5 rounded-xl text-sm text-slate-400 border border-slate-800">Back</button>
+                <button 
+                  onClick={handleClaim} 
+                  disabled={isLoading}
+                  className="flex-[2] py-3.5 rounded-xl font-bold text-black bg-gradient-to-r from-yellow-400 to-orange-500 disabled:opacity-50"
+                >
+                  {isLoading ? "Processing..." : `Claim Now →`}
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {state === "success" && (
+            <motion.div key="success" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <SuccessScreen amount={amount} chain={selectedChain?.name ?? ""} />
+            </motion.div>
+          )}
+
+          {state === "error" && (
+            <motion.div key="error" className="text-center space-y-4">
+              <h2 className="text-white text-xl font-bold">Transfer Failed</h2>
+              <button onClick={() => setState("claiming")} className="px-8 py-3 rounded-xl font-bold text-black bg-yellow-400">Try Again</button>
+            </motion.div>
+          )}
         </AnimatePresence>
       </div>
     </main>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Main Export with Suspense
+───────────────────────────────────────────── */
+export default function ClaimPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#020617] flex items-center justify-center text-white">Loading...</div>}>
+      <ClaimContent />
+    </Suspense>
   );
 }
